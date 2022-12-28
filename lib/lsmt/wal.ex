@@ -77,13 +77,4 @@ defmodule LSMT.Wal do
     |> path()
     |> File.write!(line, [:append, :sync])
   end
-
-  @doc """
-  Streams the lines of the wal.
-  """
-  def lines(directory) do
-    directory
-    |> path()
-    |> File.stream!()
-  end
 end

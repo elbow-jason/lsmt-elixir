@@ -1,4 +1,6 @@
 defmodule LSMT.Memtable do
+  @type t :: :ets.tid() | atom()
+
   @cfg [
     :ordered_set,
     :public,
@@ -59,7 +61,24 @@ defmodule LSMT.Memtable do
   @doc """
   Returns the memtable as a list.
   """
+  @spec to_list(t) :: [{term(), term()}]
   def to_list(memtable) do
     :ets.tab2list(memtable)
+  end
+
+  @doc """
+  Reduces over the memtable.
+
+  ## Examples
+
+      iex> tab = Memtable.new()
+      iex> :ok = Memtable.put(tab, "one", 1)
+      iex> :ok = Memtable.put(tab, "two", 2)
+      iex> Memtable.reduce(tab, 0, fn {_, n}, acc -> n + acc end)
+      3
+  """
+  @spec reduce(t(), any, (any, any -> any)) :: any
+  def reduce(memtable, acc, reducer) do
+    :ets.foldl(reducer, acc, memtable)
   end
 end

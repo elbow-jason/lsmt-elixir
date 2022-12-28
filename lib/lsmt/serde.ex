@@ -1,102 +1,133 @@
 defmodule LSMT.Serde do
-  @moduledoc """
-  Serialization and deserialization of keys and values.
-
-  Currently supported types: 64bit float, signed 64bit integer, atom, string.
-
-  # TODO: make serde configurable at runtime.
-  """
-
   @doc """
-  Serializes terms into their binary format.
+  Serializes a term into its binary format.
 
   ## Examples
 
       iex> Serde.ser(1)
-      "iAAAAAAAAAAE"
+      [105, <<0, 0, 0, 0, 0, 0, 0, 1>>]
 
       iex> Serde.ser(1.0)
-      "fv/AAAAAAAAA"
+      [102, <<191, 240, 0, 0, 0, 0, 0, 0>>]
 
       iex> Serde.ser(:name)
-      "abmFtZQ"
+      [97, <<0, 4>>, "name"]
 
       iex> Serde.ser("elbow")
-      "sZWxib3c"
+      [115, <<0, 0, 0, 5>>, "elbow"]
   """
-  @spec ser(atom | binary | number) :: binary
-  def ser(v) do
-    {tag, bin} = tag_and_bin(v)
-    bin64 = Base.encode64(bin, padding: false)
-    tag <> bin64
+  @spec ser(atom | binary | number) :: iodata()
+  def ser(v) when is_float(v) do
+    {:ok, bin} = ByteOrderedFloat.encode(v)
+    [?f, bin]
   end
 
-  @doc """
-  Deserializes binaries into an arbitrary Erlang/Elixir term.
+  def ser(v) when is_atom(v) do
+    bin = Atom.to_string(v)
+    n = byte_size(bin)
+    size = <<n::big-unsigned-integer-size(16)>>
+    [?a, size, bin]
+  end
 
-  ## Examples
+  def ser(v) when is_integer(v) do
+    [?i, <<v::big-signed-integer-size(64)>>]
+  end
 
-      iex> Serde.de("iAAAAAAAAAAE")
-      1
+  def ser(v) when is_binary(v) do
+    n = byte_size(v)
+    size = <<n::big-unsigned-integer-size(32)>>
+    [?s, size, v]
+  end
 
-      iex> Serde.de("fv/AAAAAAAAA")
-      1.0
+  # def ser_type(v) when is_float(v), do: :float
+  # def ser_type(v) when is_integer(v), do: :integer
+  # def ser_type(v) when is_atom(v), do: :atom
+  # def ser_type(v) when is_binary(v), do: :string
 
-      iex> Serde.de("abmFtZQ")
-      :name
+  def de_one(iodata) when is_list(iodata) do
+    iodata
+    |> IO.iodata_to_binary()
+    |> de_one()
+  end
 
-      iex> Serde.de("sZWxib3c")
-      "elbow"
-
-  """
-  @spec de(serialized_term :: binary) :: atom | binary | number
-  def de(serialized_term)
-
-  def de("f" <> bin) do
-    bin
-    |> Base.decode64!(padding: false)
-    |> ByteOrderedFloat.decode()
-    |> case do
-      {:ok, f} ->
-        f
-
-      err ->
-        raise """
-        invalid float encoding -
-          binary: #{inspect(bin, binaries: :as_binaries)}
-          reason: #{inspect(err)}
-        """
+  def de_one(bin) when is_binary(bin) do
+    with(
+      {:ok, type, byte_len, data} <- de_parts(bin),
+      {:ok, term, rest_data} <- do_de(type, byte_len, data)
+    ) do
+      {:ok, term, rest_data}
     end
   end
 
-  def de("a" <> b64) do
-    str = Base.decode64!(b64, padding: false)
-    String.to_existing_atom(str)
+  def de_many(bin) do
+    de_many(bin, [])
   end
 
-  def de(<<"i", b64::binary>>) do
-    <<v::big-signed-integer-size(64)>> = Base.decode64!(b64, padding: false)
-    v
+  defp de_many(bin, acc) do
+    case de_one(bin) do
+      {:ok, term, rest} ->
+        de_many(rest, [term | acc])
+
+      :partial ->
+        {:ok, Enum.reverse(acc), bin}
+
+      :done ->
+        {:ok, Enum.reverse(acc), ""}
+
+      {:error, _} = err ->
+        err
+    end
   end
 
-  def de(<<"s", b64::binary>>) do
-    Base.decode64!(b64, padding: false)
+  @tags [?f, ?i, ?a, ?s]
+
+  defp de_parts(""), do: :done
+  defp de_parts(<<?f, data::binary>>), do: {:ok, :float, 8, data}
+  defp de_parts(<<?i, data::binary>>), do: {:ok, :integer, 8, data}
+  defp de_parts(<<?a, l::big-unsigned-integer-16, data::binary>>), do: {:ok, :atom, l, data}
+  defp de_parts(<<?s, l::big-unsigned-integer-32, data::binary>>), do: {:ok, :string, l, data}
+  # defp de_parts(<<tag, _::binary>>) when tag in @tags, do: :partial
+  defp de_parts(<<tag, _::binary>>), do: {:error, [type: :unknown, tag: <<tag>>]}
+
+  defp do_de(type, term_len, data) do
+    data_len = byte_size(data)
+    partial_check = if data_len < term_len, do: :partial, else: :ok
+
+    with(
+      :ok <- partial_check,
+      term_bin = binary_part(data, 0, term_len),
+      rest_len = data_len - term_len,
+      rest_bin = binary_part(data, term_len, rest_len),
+      {:ok, term} <- de_type(type, term_bin)
+    ) do
+      {:ok, term, rest_bin}
+    end
   end
 
-  defp tag_and_bin(v) when is_float(v) do
-    {:ok, bin} = ByteOrderedFloat.encode(v)
-    {"f", bin}
+  defp de_type(:float, bin) when is_binary(bin) do
+    case ByteOrderedFloat.decode(bin) do
+      {:ok, f} ->
+        {:ok, f}
+
+      :error ->
+        {:error, [type: :float, reason: :invalid_encoding, binary: bin]}
+    end
   end
 
-  defp tag_and_bin(v) when is_atom(v) do
-    {"a", Atom.to_string(v)}
+  defp de_type(:integer, <<int::big-signed-integer-size(64)>>) do
+    {:ok, int}
   end
 
-  defp tag_and_bin(v) when is_integer(v) do
-    {"i", <<v::big-integer-size(64)>>}
+  defp de_type(:atom, string) when is_binary(string) do
+    atom = String.to_existing_atom(string)
+    {:ok, atom}
+  rescue
+    ArgumentError ->
+      {:error, [type: :atom, reason: :atom_does_not_exist, string: string]}
   end
 
-  defp tag_and_bin(v) when is_binary(v) do
-    {"s", v}
+  defp de_type(:string, bin) when is_binary(bin) do
+    # TODO: check for string uft8ness
+    {:ok, bin}
   end
 end

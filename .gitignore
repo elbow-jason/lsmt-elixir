@@ -26,3 +26,4 @@ lsmt-*.tar
 /tmp/
 
 /.elixir_ls/
+/priv/
